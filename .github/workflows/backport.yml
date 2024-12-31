@@ -24,7 +24,7 @@ jobs:
         id: tag
         run: |
           TAG_NAME=${GITHUB_REF#refs/tags/}
-          BRANCH=$(git branch -r --contains $TAG_NAME | grep -v HEAD | sed 's/origin\///' | head -n 1)
+          BRANCH=$(git branch -r --contains $TAG_NAME | grep -v HEAD | sed 's/origin\///' | head -n 1 | xargs)
           echo "tag_name=$TAG_NAME" >> $GITHUB_OUTPUT
           echo "source_branch=$BRANCH" >> $GITHUB_OUTPUT
       
