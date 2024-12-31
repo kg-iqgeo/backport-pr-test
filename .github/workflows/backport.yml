@@ -1,0 +1,91 @@
+name: Automated Tag Backporting
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'  # Trigger on semantic version tags
+
+jobs:
+  backport:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      
+      - name: Setup Git
+        run: |
+          git config user.name "GitHub Actions Bot"
+          git config user.email "actions@github.com"
+      
+      - name: Get tag information
+        id: tag
+        run: |
+          TAG_NAME=${GITHUB_REF#refs/tags/}
+          BRANCH=$(git branch -r --contains $TAG_NAME | grep -v HEAD | sed 's/origin\///' | head -n 1)
+          echo "tag_name=$TAG_NAME" >> $GITHUB_OUTPUT
+          echo "source_branch=$BRANCH" >> $GITHUB_OUTPUT
+      
+      - name: Define branch order
+        id: branches
+        run: |
+          # Define the order of branches from production to development
+          BRANCH_ORDER=("prod" "pre-prod" "uat" "test" "main")
+          
+          # Find the index of the source branch
+          SOURCE_INDEX=-1
+          for i in "${!BRANCH_ORDER[@]}"; do
+            if [[ "${BRANCH_ORDER[$i]}" == "${{ steps.tag.outputs.source_branch }}" ]]; then
+              SOURCE_INDEX=$i
+              break
+            fi
+          done
+          
+          # Create a list of target branches that come after the source branch
+          TARGET_BRANCHES=""
+          for ((i=$SOURCE_INDEX+1; i<${#BRANCH_ORDER[@]}; i++)); do
+            if [[ -n "$TARGET_BRANCHES" ]]; then
+              TARGET_BRANCHES="$TARGET_BRANCHES,"
+            fi
+            TARGET_BRANCHES="$TARGET_BRANCHES${BRANCH_ORDER[$i]}"
+          done
+          
+          echo "target_branches=$TARGET_BRANCHES" >> $GITHUB_OUTPUT
+      
+      - name: Create backport PRs
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          IFS=',' read -ra BRANCHES <<< "${{ steps.branches.outputs.target_branches }}"
+          TAG_NAME="${{ steps.tag.outputs.tag_name }}"
+          SOURCE_BRANCH="${{ steps.tag.outputs.source_branch }}"
+          
+          for TARGET_BRANCH in "${BRANCHES[@]}"; do
+            if git branch -r --contains $TAG_NAME | grep -q "origin/$TARGET_BRANCH"; then
+              echo "Tag $TAG_NAME already exists in branch $TARGET_BRANCH, skipping..."
+              continue
+            fi
+            
+            BACKPORT_BRANCH="backport/${TAG_NAME}-to-${TARGET_BRANCH}"
+            git checkout -b "$BACKPORT_BRANCH" "origin/$TARGET_BRANCH"
+            
+            TAG_COMMIT=$(git rev-list -n 1 $TAG_NAME)
+            if git cherry-pick $TAG_COMMIT; then
+              git push origin "$BACKPORT_BRANCH"
+              
+              gh pr create \
+                --title "⏮️ Backport $TAG_NAME to $TARGET_BRANCH" \
+                --body "Automated backport of $TAG_NAME from $SOURCE_BRANCH to $TARGET_BRANCH.
+                
+                This PR was automatically created by the backport workflow." \
+                --base "$TARGET_BRANCH" \
+                --head "$BACKPORT_BRANCH" \
+                --label "backport"
+            else
+              echo "Failed to cherry-pick $TAG_NAME to $TARGET_BRANCH due to conflicts"
+              git cherry-pick --abort
+              continue
+            fi
+          done
